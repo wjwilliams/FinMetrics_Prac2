@@ -1,0 +1,774 @@
+---
+output:
+  md_document:
+    variant: markdown_github
+---
+
+# Purpose
+
+Purpose of this work folder.
+
+Ideally store a minimum working example data set in data folder.
+
+Add binary files in bin, and closed R functions in code. Human Readable settings files (e.g. csv) should be placed in settings/
+
+
+```{r}
+
+rm(list = ls()) # Clean your environment:
+gc() # garbage collection - It can be useful to call gc after a large object has been removed, as this may prompt R to return memory to the operating system.
+library(tidyverse)
+list.files('code/', full.names = T, recursive = T) %>% .[grepl('.R', .)] %>% as.list() %>% walk(~source(.))
+```
+Links to the class and prac
+
+Find video link to last night's theory class here:
+https://youtu.be/_C2RHJ5S_rc
+
+Find the link for the practical here:
+https://youtu.be/LweAj7tkxYc
+
+#Data and return calculations
+```{r}
+library(rmsfuns)
+pacman::p_load("tidyr", "tbl2xts","devtools","lubridate", "readr", "PerformanceAnalytics", "ggplot2", "dplyr")
+dailydata <- fmxdat::findata
+```
+Let’s remove the NA’s using the nalocf function from practical 2, and calculate the daily continuous (log) returns using the TTR package’s ROC call. I introduce this package here as it does not require the data to be xts, and also provides several other technical wrapper functions that might prove useful that you can explore.
+
+
+```{r}
+pacman::p_load("TTR")
+dailydata <- 
+dailydata %>% arrange(Date) %>% 
+mutate(across(.cols = -Date, .fns = ~TTR::ROC(., type = c("continuous", "discrete")[2]))) %>% 
+    # Equivalent to:   # mutate_at(.vars = vars(-Date), ~./lag(.)-1) %>% 
+    # continuous equivalent to:   # mutate_at(.vars = vars(-Date), ~(log(.)-log(lag(.)))) 
+  mutate_at(.vars = vars(-Date), ~na.locf(., na.rm = F, maxgap = 5)) %>% filter(Date > first(Date))
+    # Pad NA's back max 5 days:
+
+
+# Let's not waste our time - remove spaces in column names!
+colnames(dailydata) <- 
+  gsub("JSE\\.","",colnames(dailydata))
+colnames(dailydata) <- 
+  gsub("\\.Close","",colnames(dailydata))
+
+#Use PA package to get a table of statistics
+tablestats <-
+  dailydata %>% tbl_xts() %>% 
+  table.Stats(., ci = 0.95, digits = 3)
+print(tablestats[,1:5])
+```
+
+As a side note - look at the incredibly high level of kurtosis (fat tails) of ABI and ABL (three is parity).
+
+PerformanceAnalytics also offers a means of cleaning the data using Boudt’s method, which is specifically designed to avoid some of the cleaning pitfalls as pertaining to portfolio construction and risk analysis. The technique reduces the magnitude, but not the direction of observations that exceed a 1−α
+ risk threshold (See Boudt, Peterson & Croux (2008) for more details)
+ 
+```{r}
+pacman::p_load("tbl2xts")
+#install:
+pacman::p_load("DEoptimR")
+pacman::p_load("robustbase")
+rtnc <-
+data(managers)
+Return.clean(managers[,1:4], 
+             method = c("none", "boudt", "geltner")[2], alpha = 0.01)
+```
+ 
+#Portfolio returns
+Below we will do a proper example of calculating portfolio returns. We will have a weight vector according to which the portfolio needs to be rebalanced at periodic dates. We will compare the performance of a randomly balanced portfolio, and that of an equally weighted portfolio.
+
+We will then calculate the portfolio values and positions at any given point in time.
+
+Be very mindful when doing this calculation - note that portfolio returns change the positions in a portfolio over time, implying that before each rebalancing, you need to calculate the position in a stock - and then whether to buy or sell some of the stock to meet the new weight.
+
+Mathematically, this implies calculating each day what the new portfolio position is given the stock’s daily return.
+
+```{r}
+# install.packages("rportfolios")
+#cannot install the package as it is no longer on cran but can use 
+
+#install.packages("https://cran.r-project.org/src/contrib/Archive/rportfolios/rportfolios_1.0-1.tar.gz")
+library(rportfolios)
+dailydata <- fmxdat::findata
+
+dailydata.subset <- 
+  
+  dailydata %>% 
+  
+  gather(Stocks, Px, -Date) %>% 
+  
+  arrange(Date) %>% 
+  
+  group_by(Stocks) %>% 
+  
+  mutate(Returns = Px/lag(Px)-1) %>% ungroup() %>% filter(Date > first(Date)) %>% 
+  
+  select(-Px)
+
+# Let's assume the portfolio rebalances each January and July.
+
+# First, let's save the exact rebalance dates and save the random weight and date information to be used later:
+# Below is a very nice way to save months and years: let's rebalance at month 1 and 7... 
+
+RebMonths <- c(1,7) # Make a parameter that can easily be changed later.
+
+RandomWeights <- 
+  
+dailydata.subset %>% 
+  
+    mutate(Months = as.numeric(format(Date, format = "%m")), #we need the months for rebalance dates
+           
+           YearMonths = as.numeric(format(Date, format = "%Y%m"))) %>% 
+  
+  filter(Months %in% RebMonths) %>% 
+  
+  group_by(YearMonths, Months, Stocks) %>% filter(Date == last(Date)) %>% ungroup()
+
+# Now let's create a column with the random weights assigned to each stock conforming to the following parameters:
+# Let's also create a random weighting vector for our selected stocks, with the following parameters:
+# They have to sum to 1...
+# Let's add constraints too - you can only have a maximum exposure to a single stock up to 20% of the equal weight.
+N_Stocks <- length(unique(RandomWeights$Stocks))
+
+Max_Exposure <-(1/N_Stocks)*1.20
+
+# Minimum exposure is, say, 2%:
+Min_Exposure <- 0.02
+
+# Now to append the weight vector, let's use the random.bounded function from rportfolios.
+
+RandomWeights_adj <-  
+  bind_cols(RandomWeights %>% arrange(Date),
+            RandomWeights %>% group_by(Date) %>% 
+
+  do( Randweights = random.bounded(n = nrow(.),
+                 x.t = 1, # Full investment...
+                 x.l = rep( Min_Exposure, nrow(.)), # Lower Bound
+                 x.u = rep( Max_Exposure, nrow(.)),
+                 max.iter = 1000) ) %>% ungroup() %>% unnest(Randweights) %>% select(-Date)
+  )
+
+# #lets try to see        
+# mutate(RandomWeights = random.bounded(n = nrow(.), 
+#                 x.t = 1, # Full investment... 
+#                  x.l = rep( Min_Exposure, nrow(.)), # Lower Bound 
+#                  x.u = rep( 0.2, nrow(.)), 
+#                  max.iter = 1000) ) %>% ungroup() %>% unnest(Randweights) %>%
+#     select(-Date)
+#   )
+
+# Sanity check: Create a stop function if it doesn't hold...
+if( RandomWeights_adj %>% group_by(Date) %>% 
+    
+    summarise(Fully_Invested = sum(Randweights)) %>% filter(Fully_Invested > 1.000001 | Fully_Invested < 0.9999999 ) %>% nrow() > 0 ) stop("\n=============\n Ooops! \nWeights do not sum to 1... Please check!\n===========\n")
+
+# Create equal weight portfolios as well:
+RandomWeights_adj <- 
+  
+RandomWeights_adj %>% 
+  
+  group_by(Date) %>% 
+  
+  mutate(EqualWeights = 1/n()) %>% 
+  
+  ungroup() %>% select(-Months, -YearMonths)
+
+# Right, so now we have equal and random-weights that we can use at rebalancing dates: January and July.
+```
+
+#Creating Portfolios
+The code below shows how we can create random portfolios using our returns above, as well as our random and equal weights.
+
+When doing portfolio return calculations, please use rmsfuns’ Safe_.Portfolip_Return.Portfolio function rather.
+
+PerformanceAnalytics’ Return.Portfolio function has a few nuances which might (without error) - give you very wrong results.
+
+I wrote a gist to show why we need to use the safe version for portfolio return calcs - it also confirms the calculation with a by-hand example.
+
+gist: https://gist.github.com/Nicktz/a24ba1775d41aab85919c505ca1b9a0c
+
+Back to our random portfolio calculation;
+
+```{r}
+pacman::p_load("PerformanceAnalytics")
+
+# Now we use the Safe_Return.portfolio function from PerformanceAnalytics
+# Note, as with most PA functions, the inputs are xts and wide...
+# Also, let's assume you are investing R1000 at the start:
+Fund_Size_at_Start <- 1000
+
+Rand_weights <- 
+RandomWeights_adj %>% select(Date, Stocks, Randweights) %>% spread(Stocks, Randweights) %>% tbl_xts() #we want to use PA package so we need it in xts format
+
+EW_weights <- 
+RandomWeights_adj %>% select(Date, Stocks, EqualWeights) %>% spread(Stocks, EqualWeights) %>% tbl_xts()
+
+#At rebalance
+
+df_Returns <- 
+dailydata.subset %>% spread(Stocks, Returns)
+
+df_Returns[is.na(df_Returns)] <- 0
+xts_df_Returns <- df_Returns %>% tbl_xts()
+#so now we have all weights and returns in xts
+    Rand_RetPort <- 
+      rmsfuns::Safe_Return.portfolio(xts_df_Returns, 
+                                     
+                       weights = Rand_weights, lag_weights = TRUE, #lag weights true means at the same time the weights are changed rather than a delayed change which is the default
+                       
+                       verbose = TRUE, contribution = TRUE, 
+                       
+                       value = Fund_Size_at_Start, geometric = TRUE) 
+
+    EW_RetPort <- 
+      rmsfuns::Safe_Return.portfolio(xts_df_Returns, 
+                                     
+                       weights = EW_weights, lag_weights = TRUE,
+                       
+                       verbose = TRUE, contribution = TRUE, 
+                       
+                       value = Fund_Size_at_Start, geometric = TRUE) 
+    
+    #Check the layers that the safe returns. because we set verbose and contribution = TRUE
+    #xts objects cant use slice so instead have to use head(1)
+
+# Clean and save portfolio returns and weights:
+Rand_Contribution <- 
+      Rand_RetPort$"contribution" %>% xts_tbl() 
+
+Rand_BPWeight <- 
+  
+      Rand_RetPort$"BOP.Weight" %>% xts_tbl() 
+
+Rand_BPValue <- 
+  
+      Rand_RetPort$"BOP.Value" %>% xts_tbl()  
+    
+# Clean and save portfolio returns and weights:
+EW_Contribution <- 
+      EW_RetPort$"contribution" %>% xts_tbl() 
+
+EW_BPWeight <- 
+      EW_RetPort$"BOP.Weight" %>% xts_tbl()  
+
+EW_BPValue <- 
+      EW_RetPort$"BOP.Value" %>% xts_tbl()
+    
+
+    names(Rand_Contribution) <- c("date", names(Rand_RetPort$"contribution"))
+    names(Rand_BPWeight) <- c("date", names(Rand_RetPort$"BOP.Weight"))
+    names(Rand_BPValue) <- c("date", names(Rand_RetPort$"BOP.Value"))
+  
+    names(EW_Contribution) <- c("date", names(Rand_RetPort$"contribution"))
+    names(EW_BPWeight) <- c("date", names(Rand_RetPort$"BOP.Weight"))
+    names(EW_BPValue) <- c("date", names(Rand_RetPort$"BOP.Value"))
+  
+    # Look at what these data.frames each convey - incredible right?
+    
+    # Let's bind all of these together now:
+    
+    df_port_return_Random <- 
+      left_join(dailydata.subset %>% rename("date" = Date),
+                Rand_BPWeight %>% gather(Stocks, weight, -date),
+                by = c("date", "Stocks") ) %>% 
+      
+      left_join(.,
+                Rand_BPValue %>% gather(Stocks, value_held, -date),
+                by = c("date", "Stocks") ) %>% 
+      
+      left_join(.,
+                Rand_Contribution %>% gather(Stocks, Contribution, -date),
+                by = c("date", "Stocks"))
+
+    df_port_return_EW <- 
+      left_join(dailydata.subset %>% rename("date" = Date),
+                EW_BPWeight %>% gather(Stocks, weight, -date),
+                by = c("date", "Stocks") ) %>% 
+      
+      left_join(.,
+                EW_BPValue %>% gather(Stocks, value_held, -date),
+                by = c("date", "Stocks") ) %>% 
+      
+      left_join(.,
+                EW_Contribution %>% gather(Stocks, Contribution, -date),
+                by = c("date", "Stocks"))
+
+# Calculate Portfolio Returns:
+df_Portf_Random <- 
+    df_port_return_Random %>% group_by(date) %>% summarise(PortfolioReturn = sum(Returns*weight, na.rm =TRUE)) %>% 
+      filter(PortfolioReturn != 0)
+      
+# Calculate Portfolio Returns:
+df_Portf_EW <- 
+    df_port_return_EW %>% group_by(date) %>% summarise(PortfolioReturn = sum(Returns*weight, na.rm =TRUE)) %>% 
+      filter(PortfolioReturn != 0)
+
+#THIS IS the same as the raw returns, this is giving the monthly returns for the entire portfolio
+#remember the difference between simple and log and therefore can transform or chaining, nico says that chaining is his preference
+```
+
+$$
+r_{t,P} = ln(1+R_{t,P}) =ln \left(  1+\sum_i^n\omega_iR_{i,t} \right) \neq \sum_i^n\omega_iR_{i,t}
+$$
+Thus, the following should be remembered:
+
+Simple returns provide convenience in summing across assets for a given date.
+
+log returns provide convenience in summing across .
+
+Luckily, it is easy to move between simple and compounded returns mathematically.
+
+By definition, simple and log returns can be written interchangeably as:
+
+From Simple →
+ log returns:
+R=exp(r)−1
+
+From log →
+ Simple returns:
+r=ln(R+1)
+
+Using the above definition, and also the convenience of summing simple returns to get weighted returns, we need to:
+
+rewrite the log to simple returns (if you started with log returns)
+
+sum the weighted simple returns to get the weighted portfolio returns (see eq ???
+).
+
+write it back into log return form again (if needed). Also, if geometric = FALSE, it uses a simple arithmetic chain (sum returns), which is what we want to use now. If geometric =TRUE, it uses a product approach useful for calculating wealth indexes.
+
+#Portfolio cumulative returns
+Calculating the value of your investment over time requires geometrically chaining our simple returns. Luckily, this is pretty easy:
+```{r}
+
+#If i had an initial investment in the portfolio how much would i have at a certain time?
+Cum_Rand <- 
+df_Portf_Random %>%
+    mutate(cumreturn_Rand = (cumprod(1 + PortfolioReturn))) %>% 
+  # Start at 1
+  mutate(cumreturn_Rand = cumreturn_Rand / first(cumreturn_Rand)) %>% select(-PortfolioReturn)
+
+Cum_EW <- 
+df_Portf_EW %>% 
+    mutate(cumreturn_EW = (cumprod(1 + PortfolioReturn))) %>% 
+    mutate(cumreturn_EW = cumreturn_EW / first(cumreturn_EW)) %>% select(-PortfolioReturn)
+
+Cum_Comp <- 
+  left_join(Cum_Rand, Cum_EW, by = "date") %>% gather(Type, Value, -date)
+
+# Now let's plot the wealth index (if you invested R100 in each) of the two portfolios::
+
+Cum_Comp %>% 
+  group_by(Type) %>% 
+  ggplot() + geom_line( aes(date, Value, color = Type) ) + 
+  theme_bw()
+```
+
+Weights plot
+```{r}
+# StackBar of monthly weights (Note the stand-out rebalance weights...):
+Rand_BPWeight %>% tbl_xts() %>% .[endpoints(.,'months')] %>% chart.StackedBar()
+```
+
+#Portfolio Risk Analasys
+## Calendar Performance
+```{r}
+pacman::p_load("knitr", "gt")
+# EW Portfolio
+t <-
+  table.CalendarReturns(df_Portf_Random %>% tbl_xts(), digits = 1, geometric = TRUE)
+Cols_length <- ncol(t)
+
+t %>% 
+    tibble::rownames_to_column() %>% 
+    rename(year = rowname) %>% 
+
+gt(rowname_col = "year") %>% 
+      tab_header(title = glue::glue("Portfolio Calendar Returns: Random")) %>% 
+      fmt_percent(
+      columns = 1:Cols_length,
+      decimals = 1
+    )
+
+# Random Portfolio
+t2 <- 
+  table.CalendarReturns(df_Portf_EW %>% tbl_xts(), digits = 1, geometric = TRUE)
+gt(t2/100) %>% 
+      tab_header(title = glue::glue("Portfolio Calendar Returns: EW")) %>% 
+      fmt_percent(
+      columns = 1:Cols_length,
+      decimals = 1
+    )
+#gt cool package to display. stuff
+# >>>>>>>>>> NOTE (NBNB): 
+# Try kable(t, caption = "Random Portfolio Calendar Returns", format = "latex")
+# in your pdf document...
+```
+##Downside risk
+```{r}
+tabdownside <-
+  table.DownsideRisk(left_join(df_Portf_Random %>% rename("Rand" = PortfolioReturn), 
+                               df_Portf_EW %>% rename("EW" = PortfolioReturn), 
+                               by = "date") %>% tbl_xts(.), 
+                     ci = 0.95, Rf=0, MAR=0)
+# Suppose I am only interested in specific elements of the table, then use:
+tabdownside <- tabdownside[c(1,5,7,8:11),]
+ 
+
+tabdownside %>% data.frame() %>% tibble::rownames_to_column() %>% 
+gt() %>% 
+        tab_header(title = glue::glue("Downside Risk estimates")) %>% 
+      fmt_percent(
+      columns = 2:3,
+      decimals = 2
+    )
+# kable(tabdownside, caption = "Downside Risk estimates")
+
+```
+
+##Risk Contribution Estimation:
+We now look at which of the stocks have been the highest contributors to our portfolio’s risk.
+
+A naive approach to measuring contribution to risk in a portfolio is to view it from a stand-alone perspective (estimating each asset’s unique risk). This is too simplistic, though, as it ignores diversification effects that might be in play when combining imperfectly correlated assets.
+
+We rather look at the Expected Shortfall contribution from each stock in our portfolio to get a more accurate sense of this overall contribution.
+
+This is done by considering the weighted decomposition of the contribution each portfolio element makes to the standard deviation of the whole portfolio. This is, effectively, the partial derivative of each univariate standard deviation with respect to the weights of each stock in our portfolio.
+
+The contribution can be negative - which would imply the stock having a diversifying element in the portfolio.
+
+Mathematically, using the SD approach, we are doing the following (with ρj
+ the Marginal Contribution to Risk (MCR):
+ 
+ $$
+ R_{p} = \Sigma_j w_j r_j
+ $$
+ 
+ 
+ $$
+ \sigma = \sqrt{\omega^T\Sigma \omega} 
+ $$
+ 
+ 
+ $$
+ \frac{\delta \sigma}{\delta \omega} =
+\frac{1}{\sigma}\Sigma\omega=\rho 
+ $$
+ 
+ 
+ $$
+ \rho_i = \frac{1}{\sigma} * \Sigma_{j}\sigma_{i,j}\omega_j \quad
+\forall i
+ $$
+ To do this calc, we need to calculate the weighted marginal contributions (ρj
+ above) of each stock we had earlier, and use PerformanceAnalytics’ ETL (expected tail loss) or StdDev function, both using: method = “component”:
+```{r}
+pacman::p_load(PortRisk)
+
+# First get the contributions to overall portfolio return made by each stock:
+Rand_Contribution <- Rand_RetPort$"contribution" %>% xts_tbl()
+
+# Notice that this adds up to the portfolio return at each date:
+left_join(Rand_Contribution %>% gather(Stocks, RetCont, -date) %>% group_by(date) %>% summarise(Verify_Ret = sum(RetCont)), 
+          Rand_RetPort$returns %>% xts_tbl, by = "date") %>% mutate(Diff = round(Verify_Ret - portfolio.returns, 5))
+
+# Now, let's consider the highest to lowest contributors to portfolio risk using ES (Expected Tail Loss or ETL):
+ES_Risk_Contributors <- 
+  
+ETL(Rand_Contribution %>% tbl_xts(), portfolio_method="component") %>% #because we give the contribution we do not need to give the weights
+  
+  .$pct_contrib_MES %>% data.frame(Risk_Contrib = .) %>% 
+  
+  tibble::rownames_to_column("Stock") %>% arrange(desc(Risk_Contrib))
+
+    print(ES_Risk_Contributors)
+    
+    #remember this is daily so need to time by sqrt(252) to get yearly risk
+    
+    
+    # This should be your default calculation, as the SD approach is more simplistic in terms of its risk treatment.
+        
+# To calculate the risk contribution for SD, note we are effectively taking the average weights over time:
+wts <- 
+  
+  Rand_RetPort$BOP.Weight %>% xts_tbl %>% 
+  
+  summarise( across(.cols = -date, .fns = ~mean(., na.rm=T)) ) %>% gather(Type, wt)
+
+# And using the actual returns:
+SD_Risk_Contributors_direct <- 
+  
+StdDev( R = dailydata.subset %>% filter(Date >= first(Rand_Contribution$date)) %>% 
+          
+        tbl_xts(spread_by = Stocks, cols_to_xts = Returns), 
+        
+        portfolio_method = "component", weights = wts$wt) %>% 
+  
+  .$pct_contrib_StdDev %>% data.frame(Risk_Contrib = .) %>% 
+  
+  tibble::rownames_to_column("Stock") %>% arrange(desc(Risk_Contrib))
+
+print(SD_Risk_Contributors_direct)
+
+
+
+# We can prove this by doing the above by hand (using the math we had before here):
+Rets <- dailydata.subset %>% tbl_xts(spread_by = Stocks, cols_to_xts = Returns)
+Sigma <- cov(dailydata.subset %>% spread(Stocks, Returns) %>% select(-Date), use = "pairwise.complete.obs")
+Wts <- Rand_RetPort$BOP.Weight %>% xts_tbl %>% summarise( across(.cols = -date, .fns = ~mean(., na.rm=T)) ) %>% gather(Type, wt) %>% arrange(Type, colnames(Sigma)) %>% pull(wt)
+
+sigma_p = sqrt((t(Wts) %*% Sigma %*% Wts)[1, 1])
+
+# Marginal Contribution:
+mctr = ((Sigma %*% Wts)/sigma_p)[, 1]
+# Conditional Contribution:
+cctr <- Wts * mctr
+
+tibble(stocks =  mctr %>% names, mc = cctr) %>% mutate(CCTR = mc / sum(mc)) %>% arrange(desc(CCTR)) %>% pull(CCTR)
+
+
+
+# You can also use the PortRisk package's Conditional Contribution to Total Risk (CCTR) approach:
+# Again, get the aggregate weights vector:    
+wts <- Rand_RetPort$BOP.Weight %>% xts_tbl %>% summarise( across(.cols = -date, .fns = ~mean(., na.rm=T)) ) %>% gather(Type, wt)
+# Specify stocks in your portfolio corresponding to the weights:
+Stx <- wts$Type
+wtssel <- wts$wt
+
+mc <- PortRisk::cctr(Stx, 
+           weights = wtssel, 
+           start = first(Rand_BPWeight$date), 
+           end = last(Rand_BPWeight$date),
+           data = dailydata.subset %>% tbl_xts(spread_by = Stocks, cols_to_xts = Returns))
+    
+Risk_Cont <- tibble(stocks =  mc %>% names, mc = mc) %>% mutate(MCC = mc / sum(mc)) %>% arrange(desc(MCC)) 
+print(Risk_Cont%>% pull(MCC)) 
+
+# DIY: Read some more on this...
+
+# Of course, you could also try out the above using a Bayesian approach as:
+# mc <- cctr.Bayes(tickers = Stx, 
+#            weights = wtssel, 
+#            start = first(Rand_BPWeight$date), 
+#            end = last(Rand_BPWeight$date),
+#            data = dailydata.subset %>% tbl_xts(spread_by = Stocks, cols_to_xts = Returns),
+#            sim.size = 1000)
+```
+ 
+ For the above, see the math for the above breakdown of portfolio SD contribution on p.4 here.
+ https://cran.r-project.org/web/packages/PortRisk/PortRisk.pdf
+
+You can also view the ES contribution discussion on p.108 here.
+https://cran.r-project.org/web/packages/PerformanceAnalytics/PerformanceAnalytics.pdf
+
+See another concise discussion of risk breakdown here.
+https://quant.stackexchange.com/a/37879/29275
+
+## Value at Risk and Expected Shortfall Measures
+In this section, let’s just briefly again revisit the calculation of the widely used portfolio risk measures of VaR and ES. We will do each by hand and then using PA package.
+
+### Historical VaR
+by hand
+```{r}
+var = apply(df_Portf_Random %>% select(-date), 
+            2,quantile, probs=c(0.05, 0.01))
+print(var)
+```
+
+ To calculate the Historical ES by hand, we need to first define a function to carry out, by column, the ES method:
+
+```{r}
+ES.f = function(x, alpha=0.05) {
+q = quantile(x, probs=alpha)
+mean(x[x <= q])
+} # See that this corresponds to the class notes...
+
+ES = apply(df_Portf_Random %>% select(-date), 
+           2, ES.f, alpha=0.05)
+
+print(ES)
+
+# Using PA is much better
+# The following will give exactly the same results as above:
+VaR(df_Portf_Random %>% tbl_xts(), p= 0.95, method = "historical")
+
+ES(df_Portf_Random  %>% tbl_xts(), p=0.95,method = "historical")
+```
+
+ 
+ ###Cornish-Fisher VaR & ES
+ 
+```{r}
+mod.var = VaR(df_Portf_Random %>% tbl_xts(), p=0.95,method="modified")
+
+mod.es = ES(df_Portf_Random %>% tbl_xts(), p=0.95,method="modified")
+
+print(mod.var)
+
+
+print(mod.es)
+```
+ 
+ ##VaR comparison
+PA also allows a simple means of comparing the three different types of VaRs tested above. It does so using the VaRSensitivity command:
+
+```{r}
+chart.VaRSensitivity(R = df_Portf_Random %>% tbl_xts(),
+                     main = "VaR Sensitivity Plot",
+                     methods=c("HistoricalVaR", "ModifiedVaR","GaussianVaR"),
+                     colorset=bluefocus, lwd=2)
+```
+
+ Then it also shows a great plot that recursively calculates the VaR and plots it vs the actual data, to give you an idea of where the returns actually fell below the VaR threshold (this takes a few minutes… be warned):
+
+```{r}
+chart.BarVaR(df_Portf_Random %>% tbl_xts(),
+             main = "Data vs Empirical VaR using rolling approach",
+             methods="HistoricalVaR")
+```
+
+#Bonus Practical: Stratification
+In this bonus practical I will show you how to do a stratification analysis.
+
+The idea behind stratification is to study statistical properties of a series during different periods
+
+An example of this could be to compare the performance of several stocks during periods where the benchmark index was volatile. Stratification would then involve:
+
+stratifying periods according to some series
+
+comparing the performance of the series during these periods.
+
+Let’s do this simple example. We want to:
+
+Identify months where the ZAR Spot experienced extreme price volatility.
+
+Identify extreme as its own top & bottom quintile (20%) by SD.
+Compare the performance of different local indexes during these periods, in particular which provided the best and worst performance, compared to overall performance.
+
+NB to winsorize returns at 1% and 99% to filter out extreme returns (check results for yourself if we skip the winzorised step)…
+
+```{r}
+library(rmsfuns)
+pacman::p_load("tidyr", "tbl2xts","devtools","lubridate", "readr", "PerformanceAnalytics", "ggplot2", "dplyr")
+
+Idxs <- 
+  
+  fmxdat::SA_Indexes %>% arrange(date) %>% 
+  
+  group_by(Tickers) %>% mutate(Return = Price / lag(Price)-1) %>% 
+  
+  ungroup() %>% 
+  
+  select(date, Tickers, Return) %>% filter(!is.na(Return)) %>% 
+  
+  mutate(YearMonth = format(date, "%Y%B"))
+
+# Consider only indexes with data from before 20080101, and use this as a common start date too...:
+# Can you argue why?
+
+Idx_Cons <- 
+  
+  Idxs %>% group_by(Tickers) %>% filter(date == first(date)) %>% 
+  
+  ungroup() %>% filter(date < ymd(20080101)) %>% 
+  
+  pull(Tickers) %>% unique
+
+Idxs <- 
+  
+  Idxs %>% 
+  
+  filter(Tickers %in% Idx_Cons) %>% 
+  
+  filter(date > ymd(20080101))
+
+# Winzorising:
+
+Idxs <-
+  
+  Idxs %>% group_by(Tickers) %>% 
+  
+  mutate(Top = quantile(Return, 0.99), Bot = quantile(Return, 0.01)) %>% 
+  
+  mutate(Return = ifelse(Return > Top, Top, 
+                         
+                         ifelse(Return < Bot, Bot, Return))) %>% ungroup()
+
+
+
+zar <- 
+  
+  fmxdat::PCA_EX_Spots  %>% 
+  
+  filter(date > ymd(20080101)) %>% filter(Spots == "ZAR_Spot") %>% 
+  
+  select(-Spots)
+
+
+ZARSD <- 
+  
+zar %>% 
+  
+  mutate(YearMonth = format(date, "%Y%B")) %>% 
+  
+  group_by(YearMonth) %>% summarise(SD = sd(Return)*sqrt(52)) %>% 
+  
+  # Top Decile Quantile overall (highly volatile month for ZAR:
+  mutate(TopQtile = quantile(SD, 0.8),
+         
+         BotQtile = quantile(SD, 0.2))
+
+
+
+Hi_Vol <- ZARSD %>% filter(SD > TopQtile) %>% pull(YearMonth)
+
+Low_Vol <- ZARSD %>% filter(SD < BotQtile) %>% pull(YearMonth)
+
+
+# Create generic function to compare performance:
+
+Perf_comparisons <- function(Idxs, YMs, Alias){
+  # For stepping through uncomment:
+  # YMs <- Hi_Vol
+  Unconditional_SD <- 
+    
+  Idxs %>% 
+    
+    group_by(Tickers) %>% 
+    
+    mutate(Full_SD = sd(Return) * sqrt(252)) %>% 
+    
+    filter(YearMonth %in% YMs) %>% 
+    
+    summarise(SD = sd(Return) * sqrt(252), across(.cols = starts_with("Full"), .fns = max)) %>% 
+    
+    arrange(desc(SD)) %>% mutate(Period = Alias) %>% 
+    
+    group_by(Tickers) %>% 
+    
+    mutate(Ratio = SD / Full_SD)
+    
+    Unconditional_SD
+  
+}
+
+perf_hi <- Perf_comparisons(Idxs, YMs = Hi_Vol, Alias = "High_Vol")
+
+perf_lo <- Perf_comparisons(Idxs, YMs = Low_Vol, Alias = "Low_Vol")
+```
+
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
