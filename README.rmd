@@ -219,7 +219,7 @@ xts_df_Returns <- df_Returns %>% tbl_xts()
                                      
                        weights = Rand_weights, lag_weights = TRUE, #lag weights true means at the same time the weights are changed rather than a delayed change which is the default
                        
-                       verbose = TRUE, contribution = TRUE, 
+                       verbose = TRUE, contribution = TRUE, #If you want more out of the return object then set verbose and contribution to true
                        
                        value = Fund_Size_at_Start, geometric = TRUE) 
 
@@ -237,11 +237,11 @@ xts_df_Returns <- df_Returns %>% tbl_xts()
 
 # Clean and save portfolio returns and weights:
 Rand_Contribution <- 
-      Rand_RetPort$"contribution" %>% xts_tbl() 
+      Rand_RetPort$"contribution" %>% xts_tbl() #All we are doing here is extracting different elements from the object returned from the function above because we kept contribution and verbose = TRUE
 
 Rand_BPWeight <- 
   
-      Rand_RetPort$"BOP.Weight" %>% xts_tbl() 
+      Rand_RetPort$"BOP.Weight" %>% xts_tbl() # BOP means beginning of period 
 
 Rand_BPValue <- 
   
@@ -349,7 +349,7 @@ Cum_Rand <-
 df_Portf_Random %>%
     mutate(cumreturn_Rand = (cumprod(1 + PortfolioReturn))) %>% 
   # Start at 1
-  mutate(cumreturn_Rand = cumreturn_Rand / first(cumreturn_Rand)) %>% select(-PortfolioReturn)
+  mutate(cumreturn_Rand = cumreturn_Rand / first(cumreturn_Rand)) %>% select(-PortfolioReturn) # this just makes the return start at 1
 
 Cum_EW <- 
 df_Portf_EW %>% 
@@ -364,7 +364,7 @@ Cum_Comp <-
 Cum_Comp %>% 
   group_by(Type) %>% 
   ggplot() + geom_line( aes(date, Value, color = Type) ) + 
-  theme_bw()
+  fmxdat::theme_fmx()
 ```
 
 Weights plot
@@ -429,7 +429,7 @@ gt() %>%
 
 ```
 
-##Risk Contribution Estimation:
+## Risk Contribution Estimation:
 We now look at which of the stocks have been the highest contributors to our portfolio’s risk.
 
 A naive approach to measuring contribution to risk in a portfolio is to view it from a stand-alone perspective (estimating each asset’s unique risk). This is too simplistic, though, as it ignores diversification effects that might be in play when combining imperfectly correlated assets.
@@ -474,7 +474,9 @@ Rand_Contribution <- Rand_RetPort$"contribution" %>% xts_tbl()
 # Notice that this adds up to the portfolio return at each date:
 left_join(Rand_Contribution %>% gather(Stocks, RetCont, -date) %>% group_by(date) %>% summarise(Verify_Ret = sum(RetCont)), 
           Rand_RetPort$returns %>% xts_tbl, by = "date") %>% mutate(Diff = round(Verify_Ret - portfolio.returns, 5))
+```
 
+```{r}
 # Now, let's consider the highest to lowest contributors to portfolio risk using ES (Expected Tail Loss or ETL):
 ES_Risk_Contributors <- 
   
@@ -487,7 +489,9 @@ ETL(Rand_Contribution %>% tbl_xts(), portfolio_method="component") %>% #because 
     print(ES_Risk_Contributors)
     
     #remember this is daily so need to time by sqrt(252) to get yearly risk
-    
+```
+
+```{r}
     
     # This should be your default calculation, as the SD approach is more simplistic in terms of its risk treatment.
         
@@ -602,7 +606,7 @@ ES(df_Portf_Random  %>% tbl_xts(), p=0.95,method = "historical")
  ###Cornish-Fisher VaR & ES
  
 ```{r}
-mod.var = VaR(df_Portf_Random %>% tbl_xts(), p=0.95,method="modified")
+mod.var = VaR(df_Portf_Random %>% tbl_xts(), p=0.95,method="modified") #remember to always set this to modified
 
 mod.es = ES(df_Portf_Random %>% tbl_xts(), p=0.95,method="modified")
 
